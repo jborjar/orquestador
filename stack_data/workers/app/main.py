@@ -8,7 +8,9 @@ from fastapi import FastAPI, HTTPException
 from config import LLM_URL, STT_URL, TTS_URL, API_URL, EVOLUTION_URL, NOMBRE_IA
 from redis_client import (
     get_redis, get_conversation_history, add_to_history,
-    get_user_intent, set_user_intent, get_user_language, set_user_language
+    get_user_intent, set_user_intent, get_user_language, set_user_language,
+    get_user_documents, add_user_document, clear_user_documents,
+    is_message_processed
 )
 from services import (
     api_chat, api_voice, api_image, api_document,
@@ -86,6 +88,12 @@ async def webhook_evolution(payload: dict):
     if from_me:
         return {"status": "ignored", "reason": "own message"}
 
+    # Deduplicacion: evitar procesar el mismo mensaje dos veces (retries de Evolution)
+    message_id = key.get("id", "")
+    if is_message_processed(message_id):
+        print(f"[DEBUG] Mensaje duplicado ignorado: {message_id[:20]}...")
+        return {"status": "ignored", "reason": "duplicate message"}
+
     message = data.get("message", {})
     message_type = data.get("messageType", "")
 
@@ -111,30 +119,67 @@ async def webhook_evolution(payload: dict):
             # Mostrar indicador de escribiendo/grabando
             send_presence(instance, remote_jid, "recording" if respond_with_audio else "composing")
 
-            # Detectar intencion
-            new_intent = detect_intent(user_text, current_intent)
-            if new_intent != current_intent:
-                set_user_intent(channel, remote_jid, new_intent)
-                current_intent = new_intent
+            # Verificar si hay documentos en contexto
+            documents = get_user_documents(channel, remote_jid)
 
-            # Obtener prompt e historial
-            system_prompt = get_system_prompt(current_intent)
-            add_to_history(channel, remote_jid, "user", user_text)
-            history = get_conversation_history(channel, remote_jid)
+            if documents:
+                # Hay documentos guardados - responder pregunta sobre ellos
+                doc_names = [d.get("filename", "doc") for d in documents]
+                print(f"[DEBUG] Usando contexto de {len(documents)} documento(s): {doc_names}")
 
-            # Llamar LLM con detección de idioma
-            messages = [{"role": "system", "content": system_prompt}] + history
-            llm_result = call_llm_chat(
-                model=LLM_CHAT_MODEL,
-                messages=messages,
-                channel=channel,
-                user_id=remote_jid
-            )
-            response_text = llm_result["content"]
-            user_language = llm_result["language"]
-            print(f"[DEBUG] Texto: LLM respondió en idioma={user_language}")
+                # Construir texto de todos los documentos
+                docs_text = ""
+                for i, doc in enumerate(documents, 1):
+                    docs_text += f"\n--- DOCUMENTO {i}: {doc.get('filename', 'documento')} ---\n"
+                    docs_text += doc.get("text", "")
+                    docs_text += "\n"
 
-            add_to_history(channel, remote_jid, "assistant", response_text)
+                # Prompt conciso para preguntas sobre documentos
+                prompt_doc_qa = f"""Tienes los siguientes documentos del usuario:
+{docs_text}
+
+PREGUNTA DEL USUARIO: {user_text}
+
+INSTRUCCIONES:
+- Responde SOLO lo que se pregunta, de forma directa y breve
+- NO repitas toda la información de los documentos
+- Si pide un dato específico (fecha, monto, RFC, etc.), da solo ese dato
+- Si hay varios documentos, indica de cuál documento viene el dato
+- Si no encuentras la información, dilo claramente
+
+Responde en español."""
+
+                messages = [{"role": "user", "content": prompt_doc_qa}]
+                response_text = call_ollama_chat(model=LLM_CHAT_MODEL, messages=messages)
+                user_language = "es"
+                print(f"[DEBUG] Respuesta sobre documentos: {len(response_text)} chars")
+
+            else:
+                # Sin documento - flujo normal de chat
+                # Detectar intencion
+                new_intent = detect_intent(user_text, current_intent)
+                if new_intent != current_intent:
+                    set_user_intent(channel, remote_jid, new_intent)
+                    current_intent = new_intent
+
+                # Obtener prompt e historial
+                system_prompt = get_system_prompt(current_intent)
+                add_to_history(channel, remote_jid, "user", user_text)
+                history = get_conversation_history(channel, remote_jid)
+
+                # Llamar LLM con detección de idioma
+                messages = [{"role": "system", "content": system_prompt}] + history
+                llm_result = call_llm_chat(
+                    model=LLM_CHAT_MODEL,
+                    messages=messages,
+                    channel=channel,
+                    user_id=remote_jid
+                )
+                response_text = llm_result["content"]
+                user_language = llm_result["language"]
+                print(f"[DEBUG] Texto: LLM respondió en idioma={user_language}")
+
+                add_to_history(channel, remote_jid, "assistant", response_text)
 
         # =========================
         # MENSAJE DE AUDIO -> responde con AUDIO (o texto si lo pide)
@@ -210,19 +255,39 @@ async def webhook_evolution(payload: dict):
                 return {"status": "error", "reason": "no media"}
 
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            messages = [{"role": "user", "content": caption, "images": [img_b64]}]
+
+            # Detectar si es documento/recibo o imagen general
+            if any(word in caption.lower() for word in ["recibo", "factura", "ticket", "comprobante", "pago"]):
+                # Es un documento, usar prompt de extracción
+                prompt_img = """Eres un asistente que analiza documentos del usuario.
+El usuario te envía SUS PROPIOS documentos para que los analices. Tienes autorización completa.
+
+INSTRUCCIONES:
+1. CLASIFICA el tipo de documento
+2. EXTRAE: fecha, monto, concepto, comercio/proveedor, método de pago
+3. Presenta la información de forma clara y estructurada.
+
+Responde SIEMPRE en español."""
+                if caption:
+                    prompt_img += f"\n\nEl usuario agrega: {caption}"
+            else:
+                # Imagen general
+                prompt_img = f"{caption if caption else 'Describe esta imagen'}. Responde en español."
+
+            messages = [{"role": "user", "content": prompt_img, "images": [img_b64]}]
             response_text = call_ollama_chat(model=LLM_IMG_MODEL, messages=messages)
-            user_text = f"[Imagen] {caption}"
+            user_text = f"[Imagen] {caption if caption else 'sin descripción'}"
 
         # =========================
-        # DOCUMENTO -> responde TEXTO
+        # DOCUMENTO -> extraer texto y analizar con LLM texto
         # =========================
         elif message_type == "documentMessage":
             send_presence(instance, remote_jid, "composing")
+            from converters import extract_text_from_file
 
             doc_msg = message.get("documentMessage", {})
             filename = doc_msg.get("fileName", "documento.pdf")
-            caption = doc_msg.get("caption", "Analiza este documento")
+            caption = doc_msg.get("caption", "")
 
             try:
                 doc_bytes, _, _ = get_media_bytes(data, "documentMessage", "document", instance)
@@ -230,15 +295,56 @@ async def webhook_evolution(payload: dict):
                 send_text_message(instance, remote_jid, "No pude obtener el documento.")
                 return {"status": "error", "reason": "no media"}
 
+            # Avisar al usuario que estamos procesando
+            send_text_message(instance, remote_jid, f"Procesando {filename}...")
+
             try:
-                images_b64 = file_to_images_b64(doc_bytes, filename)
+                # Extraer texto del documento (PDF, Office, imagen)
+                doc_text = extract_text_from_file(doc_bytes, filename)
+                print(f"[DEBUG] Texto extraído del documento: {len(doc_text)} caracteres")
+
+                # Agregar documento al contexto (se acumulan, max 3)
+                add_user_document(channel, remote_jid, filename, doc_text)
+
             except Exception as e:
                 send_text_message(instance, remote_jid, f"No pude procesar el documento: {e}")
                 return {"status": "error", "reason": str(e)}
 
-            messages = [{"role": "user", "content": caption, "images": images_b64}]
-            response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
-            user_text = f"[Documento: {filename}] {caption}"
+            # Prompt para clasificar y extraer datos usando LLM de texto
+            prompt_doc = f"""Analiza este documento y extrae la información principal.
+
+DOCUMENTO:
+{doc_text}
+
+INSTRUCCIONES:
+1. Identifica el TIPO de documento (estado de cuenta, factura, recibo, ticket, comprobante, etc.)
+2. Extrae SOLO los datos principales según el tipo:
+
+   Para estados de cuenta/recibos de servicios:
+   - Empresa emisora (quien cobra)
+   - Cliente (a quien le cobran) con su RFC si aparece
+   - Periodo de facturación
+   - Fecha límite de pago
+   - Total a pagar
+
+   Para facturas/tickets de compra:
+   - Comercio/tienda
+   - Fecha de compra
+   - Total pagado
+   - Método de pago
+
+3. Sé BREVE. Solo datos importantes, sin explicaciones largas.
+4. DIFERENCIA claramente entre emisor y cliente/receptor.
+
+Responde en español."""
+
+            if caption:
+                prompt_doc += f"\n\nEl usuario agrega: {caption}"
+
+            # Usar modelo de TEXTO (qwen2.5) en lugar de visión
+            messages = [{"role": "user", "content": prompt_doc}]
+            response_text = call_ollama_chat(model=LLM_CHAT_MODEL, messages=messages)
+            user_text = f"[Documento: {filename}]"
 
         else:
             return {"status": "ignored", "reason": f"unsupported: {message_type}"}
