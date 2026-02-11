@@ -1,0 +1,43 @@
+# =============================================================
+# Workers - Procesadores de mensajes
+# =============================================================
+# Servicio que:
+# - Recibe webhooks de canales (WhatsApp, Telegram, Web)
+# - Procesa mensajes con servicios de IA
+# - Convierte formatos de audio (OGG <-> WAV)
+# - Procesa documentos (PDF, Office)
+# =============================================================
+
+FROM python:3.11-slim
+
+ENV TZ=America/Mexico_City
+ENV LANG=es_MX.UTF-8
+
+WORKDIR /app
+
+# Dependencias del sistema:
+# - ffmpeg: Conversion de audio (ogg, mp3, etc. -> wav)
+# - poppler-utils: Conversion de PDF a imagenes (pdf2image)
+# - libreoffice-*: Conversion de documentos Office a PDF
+#   - libreoffice-writer: Word (.docx, .doc, .odt)
+#   - libreoffice-calc: Excel (.xlsx, .xls, .ods)
+#   - libreoffice-impress: PowerPoint (.pptx, .ppt, .odp)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    poppler-utils \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    locales \
+    && sed -i '/es_MX.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY app/requirements.txt .
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

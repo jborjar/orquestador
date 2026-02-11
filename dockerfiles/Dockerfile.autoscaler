@@ -1,0 +1,35 @@
+# =============================================================
+# Autoscaler - Escalado automatico de workers
+# =============================================================
+# Monitorea la cola de Redis y escala workers segun demanda
+# =============================================================
+
+FROM python:3.11-slim
+
+# Configuracion de idioma y zona horaria
+ENV TZ=America/Mexico_City
+ENV LANG=es_MX.UTF-8
+ENV LC_ALL=es_MX.UTF-8
+ENV PYTHONUNBUFFERED=1
+
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    locales \
+    curl \
+    docker.io \
+    && sed -i '/es_MX.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Directorio de trabajo
+WORKDIR /app
+
+# Instalar dependencias Python
+RUN pip install --no-cache-dir redis docker
+
+# Copiar script
+COPY autoscaler/autoscaler.py /app/autoscaler.py
+
+# Ejecutar autoscaler
+CMD ["python", "-u", "autoscaler.py"]

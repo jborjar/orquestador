@@ -1,0 +1,23 @@
+# =============================================================
+# Workers - Dependencias Python
+# =============================================================
+
+# Framework web y servidor
+fastapi
+uvicorn[standard]
+
+# Manejo de archivos multipart (uploads)
+python-multipart
+
+# Cliente HTTP para llamar a otros servicios
+requests
+
+# Conversion de PDF a imagenes
+# Requiere poppler-utils instalado en el sistema
+pdf2image
+
+# Procesamiento de imagenes
+Pillow
+
+# Cliente Redis para cola de mensajes e historial
+redis
