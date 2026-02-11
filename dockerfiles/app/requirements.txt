@@ -16,6 +16,13 @@ requests
 # Requiere poppler-utils instalado en el sistema
 pdf2image
 
+# Extraccion de texto de PDF
+pdfplumber
+
+# OCR para PDFs escaneados (fallback)
+# Requiere tesseract-ocr instalado en el sistema
+pytesseract
+
 # Procesamiento de imagenes
 Pillow
 
