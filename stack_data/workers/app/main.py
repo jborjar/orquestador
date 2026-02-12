@@ -150,7 +150,7 @@ INSTRUCCIONES:
 Responde en español."""
 
                 messages = [{"role": "user", "content": prompt_doc_qa}]
-                response_text = call_ollama_chat(model=LLM_CHAT_MODEL, messages=messages)
+                response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
                 user_language = "es"
                 print(f"[DEBUG] Respuesta sobre documentos: {len(response_text)} chars")
 
@@ -341,9 +341,9 @@ Responde en español."""
             if caption:
                 prompt_doc += f"\n\nEl usuario agrega: {caption}"
 
-            # Usar modelo de TEXTO (qwen2.5) en lugar de visión
+            # Usar modelo sin censura para documentos (dolphin)
             messages = [{"role": "user", "content": prompt_doc}]
-            response_text = call_ollama_chat(model=LLM_CHAT_MODEL, messages=messages)
+            response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
             user_text = f"[Documento: {filename}]"
 
         else:
