@@ -37,7 +37,7 @@ services:
     volumes:
       - ./stack_data/redis:/data
     networks:
-      - vpn-proxy
+      - agente_ia
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-orquestador123}", "ping"]
       interval: 10s
@@ -61,7 +61,7 @@ services:
     ports:
       - "8000:80"
     networks:
-      - vpn-proxy
+      - agente_ia
     depends_on:
       - workers
     healthcheck:
@@ -114,7 +114,7 @@ services:
     volumes:
       - ./stack_data/workers/app:/app
     networks:
-      - vpn-proxy
+      - agente_ia
     depends_on:
       redis:
         condition: service_healthy
@@ -152,12 +152,12 @@ services:
       # Acceso al directorio del proyecto para docker compose
       - ./:/opt/stacks/orquestador:ro
     networks:
-      - vpn-proxy
+      - agente_ia
     depends_on:
       redis:
         condition: service_healthy
 
 # Red externa compartida con otros stacks
 networks:
-  vpn-proxy:
+  agente_ia:
     external: true
