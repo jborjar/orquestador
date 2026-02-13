@@ -18,7 +18,7 @@ from services import (
 )
 from converters import convert_audio_to_wav, convert_wav_to_ogg
 from utils import detect_audio_format, get_spanish_only_disclaimer
-from evolution import get_media_bytes, send_text_message, send_audio_message, send_presence
+from evolution import get_media_bytes, send_text_message, send_audio_message, send_presence, PresenceManager
 from intent import detect_intent, get_intent_greeting
 
 app = FastAPI(
@@ -77,6 +77,7 @@ async def webhook_evolution(payload: dict):
     data = payload.get("data", {})
 
     print(f"[DEBUG] Webhook recibido: event={event}, instance={instance}")
+    print(f"[DEBUG] Key: {data.get('key', {})}")
 
     if event != "messages.upsert":
         return {"status": "ignored", "reason": "not a message event"}
@@ -84,6 +85,13 @@ async def webhook_evolution(payload: dict):
     key = data.get("key", {})
     remote_jid = key.get("remoteJid", "")
     from_me = key.get("fromMe", False)
+
+    # Si remoteJid no es @s.whatsapp.net, intentar usar remoteJidAlt
+    if "@s.whatsapp.net" not in remote_jid:
+        remote_jid_alt = key.get("remoteJidAlt", "")
+        if "@s.whatsapp.net" in remote_jid_alt:
+            print(f"[DEBUG] Usando remoteJidAlt: {remote_jid_alt} en lugar de {remote_jid}")
+            remote_jid = remote_jid_alt
 
     if from_me:
         return {"status": "ignored", "reason": "own message"}
@@ -115,27 +123,27 @@ async def webhook_evolution(payload: dict):
 
             # Detectar si quiere audio
             respond_with_audio = detect_wants_audio(user_text)
-
-            # Mostrar indicador de escribiendo/grabando
-            send_presence(instance, remote_jid, "recording" if respond_with_audio else "composing")
+            presence_type = "recording" if respond_with_audio else "composing"
 
             # Verificar si hay documentos en contexto
             documents = get_user_documents(channel, remote_jid)
 
-            if documents:
-                # Hay documentos guardados - responder pregunta sobre ellos
-                doc_names = [d.get("filename", "doc") for d in documents]
-                print(f"[DEBUG] Usando contexto de {len(documents)} documento(s): {doc_names}")
+            # Procesar con indicador de presencia activo
+            with PresenceManager(instance, remote_jid, presence_type):
+                if documents:
+                    # Hay documentos guardados - responder pregunta sobre ellos
+                    doc_names = [d.get("filename", "doc") for d in documents]
+                    print(f"[DEBUG] Usando contexto de {len(documents)} documento(s): {doc_names}")
 
-                # Construir texto de todos los documentos
-                docs_text = ""
-                for i, doc in enumerate(documents, 1):
-                    docs_text += f"\n--- DOCUMENTO {i}: {doc.get('filename', 'documento')} ---\n"
-                    docs_text += doc.get("text", "")
-                    docs_text += "\n"
+                    # Construir texto de todos los documentos
+                    docs_text = ""
+                    for i, doc in enumerate(documents, 1):
+                        docs_text += f"\n--- DOCUMENTO {i}: {doc.get('filename', 'documento')} ---\n"
+                        docs_text += doc.get("text", "")
+                        docs_text += "\n"
 
-                # Prompt conciso para preguntas sobre documentos
-                prompt_doc_qa = f"""Tienes los siguientes documentos del usuario:
+                    # Prompt conciso para preguntas sobre documentos
+                    prompt_doc_qa = f"""Tienes los siguientes documentos del usuario:
 {docs_text}
 
 PREGUNTA DEL USUARIO: {user_text}
@@ -149,37 +157,37 @@ INSTRUCCIONES:
 
 Responde en español."""
 
-                messages = [{"role": "user", "content": prompt_doc_qa}]
-                response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
-                user_language = "es"
-                print(f"[DEBUG] Respuesta sobre documentos: {len(response_text)} chars")
+                    messages = [{"role": "user", "content": prompt_doc_qa}]
+                    response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
+                    user_language = "es"
+                    print(f"[DEBUG] Respuesta sobre documentos: {len(response_text)} chars")
 
-            else:
-                # Sin documento - flujo normal de chat
-                # Detectar intencion
-                new_intent = detect_intent(user_text, current_intent)
-                if new_intent != current_intent:
-                    set_user_intent(channel, remote_jid, new_intent)
-                    current_intent = new_intent
+                else:
+                    # Sin documento - flujo normal de chat
+                    # Detectar intencion
+                    new_intent = detect_intent(user_text, current_intent)
+                    if new_intent != current_intent:
+                        set_user_intent(channel, remote_jid, new_intent)
+                        current_intent = new_intent
 
-                # Obtener prompt e historial
-                system_prompt = get_system_prompt(current_intent)
-                add_to_history(channel, remote_jid, "user", user_text)
-                history = get_conversation_history(channel, remote_jid)
+                    # Obtener prompt e historial
+                    system_prompt = get_system_prompt(current_intent)
+                    add_to_history(channel, remote_jid, "user", user_text)
+                    history = get_conversation_history(channel, remote_jid)
 
-                # Llamar LLM con detección de idioma
-                messages = [{"role": "system", "content": system_prompt}] + history
-                llm_result = call_llm_chat(
-                    model=LLM_CHAT_MODEL,
-                    messages=messages,
-                    channel=channel,
-                    user_id=remote_jid
-                )
-                response_text = llm_result["content"]
-                user_language = llm_result["language"]
-                print(f"[DEBUG] Texto: LLM respondió en idioma={user_language}")
+                    # Llamar LLM con detección de idioma
+                    messages = [{"role": "system", "content": system_prompt}] + history
+                    llm_result = call_llm_chat(
+                        model=LLM_CHAT_MODEL,
+                        messages=messages,
+                        channel=channel,
+                        user_id=remote_jid
+                    )
+                    response_text = llm_result["content"]
+                    user_language = llm_result["language"]
+                    print(f"[DEBUG] Texto: LLM respondió en idioma={user_language}")
 
-                add_to_history(channel, remote_jid, "assistant", response_text)
+                    add_to_history(channel, remote_jid, "assistant", response_text)
 
         # =========================
         # MENSAJE DE AUDIO -> responde con AUDIO (o texto si lo pide)
@@ -209,42 +217,40 @@ Responde en español."""
 
             # Por defecto audio responde audio, salvo que pida texto
             respond_with_audio = not detect_wants_text(user_text)
+            presence_type = "recording" if respond_with_audio else "composing"
 
-            # Mostrar indicador segun tipo de respuesta
-            send_presence(instance, remote_jid, "recording" if respond_with_audio else "composing")
+            # Procesar con indicador de presencia activo
+            with PresenceManager(instance, remote_jid, presence_type):
+                # Detectar intencion
+                new_intent = detect_intent(user_text, current_intent)
+                if new_intent != current_intent:
+                    set_user_intent(channel, remote_jid, new_intent)
+                    current_intent = new_intent
+                print(f"[DEBUG] Audio intent: {current_intent}")
 
-            # Detectar intencion
-            new_intent = detect_intent(user_text, current_intent)
-            if new_intent != current_intent:
-                set_user_intent(channel, remote_jid, new_intent)
-                current_intent = new_intent
-            print(f"[DEBUG] Audio intent: {current_intent}")
+                # Obtener prompt e historial
+                system_prompt = get_system_prompt(current_intent)
+                add_to_history(channel, remote_jid, "user", user_text)
+                history = get_conversation_history(channel, remote_jid)
 
-            # Obtener prompt e historial
-            system_prompt = get_system_prompt(current_intent)
-            add_to_history(channel, remote_jid, "user", user_text)
-            history = get_conversation_history(channel, remote_jid)
+                # Llamar LLM con detección de idioma
+                messages = [{"role": "system", "content": system_prompt}] + history
+                llm_result = call_llm_chat(
+                    model=LLM_CHAT_MODEL,
+                    messages=messages,
+                    channel=channel,
+                    user_id=remote_jid
+                )
+                response_text = llm_result["content"]
+                user_language = llm_result["language"]
+                print(f"[DEBUG] Audio: LLM respondió en idioma={user_language}")
 
-            # Llamar LLM con detección de idioma
-            messages = [{"role": "system", "content": system_prompt}] + history
-            llm_result = call_llm_chat(
-                model=LLM_CHAT_MODEL,
-                messages=messages,
-                channel=channel,
-                user_id=remote_jid
-            )
-            response_text = llm_result["content"]
-            user_language = llm_result["language"]
-            print(f"[DEBUG] Audio: LLM respondió en idioma={user_language}")
-
-            add_to_history(channel, remote_jid, "assistant", response_text)
+                add_to_history(channel, remote_jid, "assistant", response_text)
 
         # =========================
         # IMAGEN -> responde TEXTO
         # =========================
         elif message_type == "imageMessage":
-            send_presence(instance, remote_jid, "composing")
-
             image_msg = message.get("imageMessage", {})
             caption = image_msg.get("caption", "Describe esta imagen")
 
@@ -256,10 +262,12 @@ Responde en español."""
 
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
-            # Detectar si es documento/recibo o imagen general
-            if any(word in caption.lower() for word in ["recibo", "factura", "ticket", "comprobante", "pago"]):
-                # Es un documento, usar prompt de extracción
-                prompt_img = """Eres un asistente que analiza documentos del usuario.
+            # Procesar con indicador de presencia activo
+            with PresenceManager(instance, remote_jid, "composing"):
+                # Detectar si es documento/recibo o imagen general
+                if any(word in caption.lower() for word in ["recibo", "factura", "ticket", "comprobante", "pago"]):
+                    # Es un documento, usar prompt de extracción
+                    prompt_img = """Eres un asistente que analiza documentos del usuario.
 El usuario te envía SUS PROPIOS documentos para que los analices. Tienes autorización completa.
 
 INSTRUCCIONES:
@@ -268,21 +276,20 @@ INSTRUCCIONES:
 3. Presenta la información de forma clara y estructurada.
 
 Responde SIEMPRE en español."""
-                if caption:
-                    prompt_img += f"\n\nEl usuario agrega: {caption}"
-            else:
-                # Imagen general
-                prompt_img = f"{caption if caption else 'Describe esta imagen'}. Responde en español."
+                    if caption:
+                        prompt_img += f"\n\nEl usuario agrega: {caption}"
+                else:
+                    # Imagen general
+                    prompt_img = f"{caption if caption else 'Describe esta imagen'}. Responde en español."
 
-            messages = [{"role": "user", "content": prompt_img, "images": [img_b64]}]
-            response_text = call_ollama_chat(model=LLM_IMG_MODEL, messages=messages)
-            user_text = f"[Imagen] {caption if caption else 'sin descripción'}"
+                messages = [{"role": "user", "content": prompt_img, "images": [img_b64]}]
+                response_text = call_ollama_chat(model=LLM_IMG_MODEL, messages=messages)
+                user_text = f"[Imagen] {caption if caption else 'sin descripción'}"
 
         # =========================
         # DOCUMENTO -> extraer texto y analizar con LLM texto
         # =========================
         elif message_type == "documentMessage":
-            send_presence(instance, remote_jid, "composing")
             from converters import extract_text_from_file
 
             doc_msg = message.get("documentMessage", {})
@@ -298,20 +305,22 @@ Responde SIEMPRE en español."""
             # Avisar al usuario que estamos procesando
             send_text_message(instance, remote_jid, f"Procesando {filename}...")
 
-            try:
-                # Extraer texto del documento (PDF, Office, imagen)
-                doc_text = extract_text_from_file(doc_bytes, filename)
-                print(f"[DEBUG] Texto extraído del documento: {len(doc_text)} caracteres")
+            # Procesar con indicador de presencia activo
+            with PresenceManager(instance, remote_jid, "composing"):
+                try:
+                    # Extraer texto del documento (PDF, Office, imagen)
+                    doc_text = extract_text_from_file(doc_bytes, filename)
+                    print(f"[DEBUG] Texto extraído del documento: {len(doc_text)} caracteres")
 
-                # Agregar documento al contexto (se acumulan, max 3)
-                add_user_document(channel, remote_jid, filename, doc_text)
+                    # Agregar documento al contexto (se acumulan, max 3)
+                    add_user_document(channel, remote_jid, filename, doc_text)
 
-            except Exception as e:
-                send_text_message(instance, remote_jid, f"No pude procesar el documento: {e}")
-                return {"status": "error", "reason": str(e)}
+                except Exception as e:
+                    send_text_message(instance, remote_jid, f"No pude procesar el documento: {e}")
+                    return {"status": "error", "reason": str(e)}
 
-            # Prompt para clasificar y extraer datos usando LLM de texto
-            prompt_doc = f"""Analiza este documento y extrae la información principal.
+                # Prompt para clasificar y extraer datos usando LLM de texto
+                prompt_doc = f"""Analiza este documento y extrae la información principal.
 
 DOCUMENTO:
 {doc_text}
@@ -338,13 +347,13 @@ INSTRUCCIONES:
 
 Responde en español."""
 
-            if caption:
-                prompt_doc += f"\n\nEl usuario agrega: {caption}"
+                if caption:
+                    prompt_doc += f"\n\nEl usuario agrega: {caption}"
 
-            # Usar modelo sin censura para documentos (dolphin)
-            messages = [{"role": "user", "content": prompt_doc}]
-            response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
-            user_text = f"[Documento: {filename}]"
+                # Usar modelo sin censura para documentos (dolphin)
+                messages = [{"role": "user", "content": prompt_doc}]
+                response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
+                user_text = f"[Documento: {filename}]"
 
         else:
             return {"status": "ignored", "reason": f"unsupported: {message_type}"}
@@ -370,6 +379,9 @@ Responde en español."""
         else:
             # Enviar texto
             send_text_message(instance, remote_jid, response_text)
+
+        # El indicador de presencia expira automaticamente en 3 segundos
+        # (el PresenceManager ya dejo de renovarlo al salir del bloque with)
 
         return {
             "status": "ok",

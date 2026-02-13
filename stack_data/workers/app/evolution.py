@@ -2,6 +2,8 @@
 Evolution API - Funciones para WhatsApp
 """
 import base64
+import threading
+import time
 
 import requests
 from fastapi import HTTPException
@@ -116,7 +118,7 @@ def send_audio_message(instance: str, remote_jid: str, audio_b64: str):
         print(f"Error enviando audio a {number}: {e}")
 
 
-def send_presence(instance: str, remote_jid: str, presence: str = "composing"):
+def send_presence(instance: str, remote_jid: str, presence: str = "composing", delay: int = 3000):
     """
     Envia estado de presencia via Evolution.
 
@@ -124,12 +126,59 @@ def send_presence(instance: str, remote_jid: str, presence: str = "composing"):
     - "composing" (escribiendo...)
     - "recording" (grabando audio...)
     - "paused" (detener indicador)
+
+    delay: tiempo en ms que se mantiene el indicador (default 3 segundos)
     """
     url = f"{EVOLUTION_URL}/chat/sendPresence/{instance}"
     number = extract_number(remote_jid)
-    payload = {"number": number, "presence": presence, "delay": 1200}
+    payload = {"number": number, "presence": presence, "delay": delay}
     try:
         r = requests.post(url, json=payload, headers=get_evolution_headers(), timeout=10)
         r.raise_for_status()
     except Exception as e:
         print(f"Error enviando presencia: {e}")
+
+
+class PresenceManager:
+    """
+    Context manager para mantener indicador de presencia activo mientras se procesa.
+
+    Uso:
+        with PresenceManager(instance, remote_jid, "composing"):
+            # procesar mensaje...
+            # el indicador se renueva automaticamente cada 2 segundos
+        # al salir, el indicador se detiene
+    """
+
+    def __init__(self, instance: str, remote_jid: str, presence: str = "composing", interval: float = 2.0):
+        self.instance = instance
+        self.remote_jid = remote_jid
+        self.presence = presence
+        self.interval = interval
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def _presence_loop(self):
+        """Hilo que envia presencia periodicamente."""
+        while not self._stop_event.is_set():
+            send_presence(self.instance, self.remote_jid, self.presence, delay=3000)
+            # Esperar el intervalo o hasta que se detenga
+            self._stop_event.wait(self.interval)
+
+    def __enter__(self):
+        """Inicia el hilo de presencia."""
+        # Enviar presencia inicial inmediatamente
+        send_presence(self.instance, self.remote_jid, self.presence, delay=3000)
+        # Iniciar hilo para renovar
+        self._thread = threading.Thread(target=self._presence_loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Detiene el hilo de presencia."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        # No enviamos "paused" porque no funciona bien
+        # Simplemente dejamos de enviar presencia y expira en 3 segundos
+        return False

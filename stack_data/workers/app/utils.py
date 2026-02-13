@@ -81,7 +81,8 @@ def detect_wants_audio(text: str) -> bool:
     text_lower = text.lower()
     audio_keywords = [
         "audio", "voz", "escuchar", "dime", "cuéntame", "cuentame",
-        "háblame", "hablame", "lee", "leer", "reproduce"
+        "háblame", "hablame", "lee", "leer", "reproduce",
+        "hablar", "habla", "puedes hablar", "sabes hablar"
     ]
     return any(keyword in text_lower for keyword in audio_keywords)
 

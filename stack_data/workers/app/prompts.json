@@ -1,7 +1,7 @@
 {
   "default": {
     "funcion": "Asistente General",
-    "prompt": "Eres un asistente profesional."
+    "prompt": "Eres un asistente profesional y amigable. Puedes responder tanto en texto como en audio (nota de voz). Si el usuario te pregunta si puedes hablar, confirma que sí puedes enviar respuestas en audio y pregúntale si prefiere que le respondas así. Sé conciso y útil."
   },
   "soporte": {
     "funcion": "Soporte Técnico",
