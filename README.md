@@ -95,18 +95,26 @@ curl -X POST http://localhost:8000/api/chat \
 
 ## Configuracion del Webhook
 
-El webhook de WhatsApp se configura automaticamente desde `mensajeria/init.sh`.
+El webhook debe configurarse en Evolution API (servidor 172.16.1.58) para enviar eventos a este orquestador.
 
-Para configuracion manual:
+### Desde Evolution Manager
+
+1. Acceder a `http://172.16.1.58:8080/manager`
+2. Entrar a la instancia de WhatsApp
+3. Ir a **Webhooks** → Agregar:
+   - **URL**: `http://172.16.1.57:8000/webhook/evolution`
+   - **Events**: `MESSAGES_UPSERT`, `CONNECTION_UPDATE`
+
+### Via API (ejecutar en servidor 172.16.1.58)
 
 ```bash
-curl -X POST "http://evolution:8080/webhook/set/whatsapp_main" \
+curl -X POST "http://localhost:8080/webhook/set/whatsapp_main" \
   -H "apikey: TU_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "webhook": {
       "enabled": true,
-      "url": "http://workers:8000/webhook/evolution",
+      "url": "http://172.16.1.57:8000/webhook/evolution",
       "webhookByEvents": true,
       "webhookBase64": true,
       "events": ["MESSAGES_UPSERT"]
@@ -171,12 +179,14 @@ flowchart TB
 | LLM_IMG_MODEL | Modelo para imagenes | llava:7b |
 | LLM_DOCS_MODEL | Modelo para documentos | llava:7b |
 
-### Evolution API
+### Evolution API (servidor remoto)
 
 | Variable | Descripcion | Default |
 |----------|-------------|---------|
-| EVOLUTION_URL | URL de Evolution API | http://evolution:8080 |
+| EVOLUTION_URL | URL de Evolution API | http://172.16.1.58:8080 |
 | EVOLUTION_API_KEY | API Key de Evolution | - |
+
+> **Nota**: Evolution API corre en el servidor `172.16.1.58` (stack mensajeria). Obtener el `EVOLUTION_API_KEY` de `mensajeria/.env` (variable `AUTHENTICATION_API_KEY`).
 
 ### Autoscaler
 
@@ -220,10 +230,21 @@ orquestador/
 
 Este stack requiere:
 
-1. **agente_ia** - Servicios de IA (STT, TTS, LLM)
-2. **mensajeria** - Evolution API para WhatsApp
+1. **agente_ia** - Servicios de IA (STT, TTS, LLM) - misma red `agente_ia`
+2. **mensajeria** - Evolution API para WhatsApp - servidor `172.16.1.58:8080`
 
-Ambos deben estar en la misma red `vpn-proxy`.
+### Arquitectura Multi-Servidor
+
+```
+Servidor 172.16.1.57 (IA)              Servidor 172.16.1.58 (mensajeria)
+┌─────────────────────────┐            ┌─────────────────────────┐
+│  Orquestador :8000      │◄──────────►│  Evolution API :8080    │
+│  Agente IA              │   HTTP     │  Chatwoot :3000         │
+│    - STT :8001          │            │  Mautic :8081           │
+│    - TTS :8002          │            │                         │
+│    - LLM :11434         │            │                         │
+└─────────────────────────┘            └─────────────────────────┘
+```
 
 ## Troubleshooting
 
@@ -252,10 +273,16 @@ docker exec workers curl -s http://agente_ia:11434
 ### Webhook no recibe mensajes
 
 ```bash
-# Verificar configuracion del webhook en Evolution
-source ../mensajeria/.env
-curl -s "http://evolution:8080/webhook/find/whatsapp_main" \
+# Verificar configuracion del webhook en Evolution (ejecutar en 172.16.1.58)
+source .env
+curl -s "http://localhost:8080/webhook/find/whatsapp_main" \
   -H "apikey: $AUTHENTICATION_API_KEY"
+
+# Verificar conectividad desde Evolution hacia Orquestador
+curl -s "http://172.16.1.57:8000/health"
+
+# Ver logs del orquestador
+docker logs orquestador --tail 50 | grep -i webhook
 ```
 
 ## Autoscaling
