@@ -264,33 +264,75 @@ Responde en español."""
 
             # Procesar con indicador de presencia activo
             with PresenceManager(instance, remote_jid, "composing"):
-                # Detectar si es documento/recibo o imagen general
-                if any(word in caption.lower() for word in ["recibo", "factura", "ticket", "comprobante", "pago"]):
-                    # Es un documento, usar prompt de extracción
-                    prompt_img = """Eres un asistente que analiza documentos del usuario.
-El usuario te envía SUS PROPIOS documentos para que los analices. Tienes autorización completa.
+                caption_lower = caption.lower() if caption else ""
 
-INSTRUCCIONES:
-1. CLASIFICA el tipo de documento
-2. EXTRAE: fecha, monto, concepto, comercio/proveedor, método de pago
-3. Presenta la información de forma clara y estructurada.
+                # Detectar tipo de documento en la imagen
+                is_identificacion = any(word in caption_lower for word in [
+                    "ine", "ife", "credencial", "identificacion", "identificación",
+                    "pasaporte", "licencia", "id", "votante", "elector"
+                ])
+                is_recibo = any(word in caption_lower for word in [
+                    "recibo", "factura", "ticket", "comprobante", "pago", "nota"
+                ])
+                is_csf = any(word in caption_lower for word in [
+                    "csf", "constancia", "fiscal", "sat", "rfc"
+                ])
 
-Responde SIEMPRE en español."""
-                    if caption:
-                        prompt_img += f"\n\nEl usuario agrega: {caption}"
+                if is_identificacion:
+                    # Credencial de identificación
+                    prompt_img = """Esta es una identificación oficial del usuario.
+
+Extrae SOLO estos datos (los que sean visibles):
+- Nombre completo
+- CURP (si aparece)
+- Clave de elector (si es INE/IFE)
+- Fecha de nacimiento
+- Domicilio
+
+Responde en español, de forma breve y estructurada."""
+
+                elif is_csf:
+                    # Constancia de Situación Fiscal
+                    prompt_img = """Esta es una Constancia de Situación Fiscal (CSF) del SAT México.
+
+Extrae SOLO estos datos:
+- Nombre o Razón Social
+- RFC
+- Régimen(es) fiscal(es)
+- Domicilio fiscal
+
+Responde en español, de forma breve y estructurada."""
+
+                elif is_recibo:
+                    # Recibo/factura/comprobante de pago
+                    prompt_img = """Este es un comprobante de pago o factura.
+
+Extrae SOLO estos datos:
+- Comercio/Proveedor
+- Fecha
+- Concepto(s)
+- Total
+- Método de pago (si aparece)
+
+Responde en español, de forma breve y estructurada."""
+
                 else:
-                    # Imagen general
-                    prompt_img = f"{caption if caption else 'Describe esta imagen'}. Responde en español."
+                    # Imagen general - descripción breve
+                    if caption:
+                        prompt_img = f"{caption}. Responde en español de forma breve."
+                    else:
+                        prompt_img = "Describe brevemente qué hay en esta imagen. Responde en español."
 
                 messages = [{"role": "user", "content": prompt_img, "images": [img_b64]}]
                 response_text = call_ollama_chat(model=LLM_IMG_MODEL, messages=messages)
                 user_text = f"[Imagen] {caption if caption else 'sin descripción'}"
 
         # =========================
-        # DOCUMENTO -> extraer texto y analizar con LLM texto
+        # DOCUMENTO -> extraer texto o enviar como imagen a visión
         # =========================
         elif message_type == "documentMessage":
-            from converters import extract_text_from_file
+            from converters import extract_text_from_file, file_to_images_b64
+            from config import LLM_IMG_MODEL
 
             doc_msg = message.get("documentMessage", {})
             filename = doc_msg.get("fileName", "documento.pdf")
@@ -308,52 +350,157 @@ Responde SIEMPRE en español."""
             # Procesar con indicador de presencia activo
             with PresenceManager(instance, remote_jid, "composing"):
                 try:
-                    # Extraer texto del documento (PDF, Office, imagen)
-                    doc_text = extract_text_from_file(doc_bytes, filename)
-                    print(f"[DEBUG] Texto extraído del documento: {len(doc_text)} caracteres")
-
-                    # Agregar documento al contexto (se acumulan, max 3)
-                    add_user_document(channel, remote_jid, filename, doc_text)
+                    # Intentar extraer texto del documento
+                    doc_text, es_escaneado = extract_text_from_file(doc_bytes, filename)
+                    print(f"[DEBUG] Documento: es_escaneado={es_escaneado}, texto={len(doc_text) if doc_text else 0} chars")
 
                 except Exception as e:
                     send_text_message(instance, remote_jid, f"No pude procesar el documento: {e}")
                     return {"status": "error", "reason": str(e)}
 
-                # Prompt para clasificar y extraer datos usando LLM de texto
-                prompt_doc = f"""Analiza este documento y extrae la información principal.
+                # Si es documento escaneado/imagen, usar modelo de visión
+                if es_escaneado:
+                    print(f"[DEBUG] Documento escaneado, usando modelo de visión")
+
+                    # Convertir documento a imágenes
+                    images_b64 = file_to_images_b64(doc_bytes, filename)
+                    print(f"[DEBUG] Documento convertido a {len(images_b64)} imagen(es)")
+
+                    # Detectar tipo por nombre de archivo
+                    filename_lower = filename.lower()
+                    is_csf = "csf" in filename_lower
+
+                    # Construir prompt para visión
+                    if is_csf:
+                        prompt_vision = """Esta es una Constancia de Situación Fiscal (CSF) del SAT México.
+
+Extrae SOLO estos datos:
+- Nombre o Razón Social
+- RFC
+- Régimen(es) fiscal(es)
+- Domicilio fiscal
+
+Responde en español, de forma breve y estructurada."""
+                    else:
+                        prompt_vision = """Analiza este documento y extrae la información principal.
+
+Identifica el tipo de documento y extrae los datos más relevantes.
+Responde en español, de forma breve."""
+
+                    if caption:
+                        prompt_vision += f"\n\nEl usuario agrega: {caption}"
+
+                    # Enviar primera página al modelo de visión
+                    messages = [{"role": "user", "content": prompt_vision, "images": [images_b64[0]]}]
+                    response_text = call_ollama_chat(model=LLM_IMG_MODEL, messages=messages)
+
+                    # Guardar descripción en contexto (no el texto OCR)
+                    add_user_document(channel, remote_jid, filename, f"[Documento analizado por visión]\n{response_text}")
+                    user_text = f"[Documento: {filename}]"
+
+                else:
+                    # Documento con texto extraíble - flujo normal
+                    print(f"[DEBUG] Texto extraído del documento: {len(doc_text)} caracteres")
+
+                    # Agregar documento al contexto
+                    add_user_document(channel, remote_jid, filename, doc_text)
+
+                    # Detectar tipo de documento en Python
+                    filename_lower = filename.lower()
+                    doc_text_lower = doc_text.lower()
+
+                    # Detectar CSF/Constancia de Situación Fiscal
+                    is_csf = (
+                        "csf" in filename_lower or
+                        "constancia de situación fiscal" in doc_text_lower or
+                        "constancia de situacion fiscal" in doc_text_lower or
+                        "cédula de identificación fiscal" in doc_text_lower or
+                        "cedula de identificacion fiscal" in doc_text_lower or
+                        ("sat" in doc_text_lower and "hacienda" in doc_text_lower)
+                    )
+
+                    # Detectar factura/CFDI
+                    is_factura = (
+                        "factura" in filename_lower or
+                        "cfdi" in doc_text_lower or
+                        ("factura" in doc_text_lower and "total" in doc_text_lower)
+                    )
+
+                    # Detectar estado de cuenta
+                    is_estado_cuenta = (
+                        "estado de cuenta" in doc_text_lower or
+                        ("saldo" in doc_text_lower and "movimientos" in doc_text_lower)
+                    )
+
+                    # Construir prompt específico según tipo detectado
+                    if is_csf:
+                        doc_type = "CSF (Constancia de Situación Fiscal)"
+                        prompt_doc = f"""Este documento es una {doc_type}.
 
 DOCUMENTO:
 {doc_text}
 
-INSTRUCCIONES:
-1. Identifica el TIPO de documento (estado de cuenta, factura, recibo, ticket, comprobante, etc.)
-2. Extrae SOLO los datos principales según el tipo:
+Extrae SOLO estos datos:
+- Nombre o Razón Social
+- RFC
+- Régimen(es) fiscal(es)
+- Domicilio fiscal
+- Fecha de inscripción o inicio de obligaciones (si aparece)
 
-   Para estados de cuenta/recibos de servicios:
-   - Empresa emisora (quien cobra)
-   - Cliente (a quien le cobran) con su RFC si aparece
-   - Periodo de facturación
-   - Fecha límite de pago
-   - Total a pagar
+Responde en español, de forma breve y estructurada."""
 
-   Para facturas/tickets de compra:
-   - Comercio/tienda
-   - Fecha de compra
-   - Total pagado
-   - Método de pago
+                    elif is_factura:
+                        doc_type = "Factura/CFDI"
+                        prompt_doc = f"""Este documento es una {doc_type}.
 
-3. Sé BREVE. Solo datos importantes, sin explicaciones largas.
-4. DIFERENCIA claramente entre emisor y cliente/receptor.
+DOCUMENTO:
+{doc_text}
 
-Responde en español."""
+Extrae SOLO estos datos:
+- Emisor (quien factura)
+- Receptor (a quien se factura)
+- Fecha de emisión
+- Conceptos/productos
+- Total
 
-                if caption:
-                    prompt_doc += f"\n\nEl usuario agrega: {caption}"
+Responde en español, de forma breve."""
 
-                # Usar modelo sin censura para documentos (dolphin)
-                messages = [{"role": "user", "content": prompt_doc}]
-                response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
-                user_text = f"[Documento: {filename}]"
+                    elif is_estado_cuenta:
+                        doc_type = "Estado de cuenta"
+                        prompt_doc = f"""Este documento es un {doc_type}.
+
+DOCUMENTO:
+{doc_text}
+
+Extrae SOLO estos datos:
+- Institución/Empresa
+- Cliente
+- Periodo
+- Saldo anterior
+- Saldo actual o total a pagar
+
+Responde en español, de forma breve."""
+
+                    else:
+                        doc_type = "Documento"
+                        prompt_doc = f"""Analiza este documento y extrae la información principal.
+
+ARCHIVO: {filename}
+DOCUMENTO:
+{doc_text}
+
+Identifica el tipo de documento y extrae los datos más relevantes.
+Responde en español, de forma breve."""
+
+                    print(f"[DEBUG] Tipo detectado: {doc_type}")
+
+                    if caption:
+                        prompt_doc += f"\n\nEl usuario agrega: {caption}"
+
+                    # Usar modelo de documentos
+                    messages = [{"role": "user", "content": prompt_doc}]
+                    response_text = call_ollama_chat(model=LLM_DOCS_MODEL, messages=messages)
+                    user_text = f"[Documento: {filename}]"
 
         else:
             return {"status": "ignored", "reason": f"unsupported: {message_type}"}

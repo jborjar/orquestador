@@ -131,11 +131,16 @@ def file_to_images_b64(file_bytes: bytes, filename: str) -> List[str]:
     return images_b64
 
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+def extract_text_from_pdf(pdf_bytes: bytes) -> tuple:
     """
     Extrae texto de un PDF.
-    Primero intenta extraer texto directamente (PDF con texto).
-    Si no hay texto, usa OCR (PDF escaneado).
+    Intenta extraer texto directamente (PDF con texto).
+    Si no hay texto, retorna None para indicar que es un PDF escaneado.
+
+    Returns:
+        tuple: (texto, es_escaneado)
+            - texto: str con el texto extraído o None si es escaneado
+            - es_escaneado: bool True si el PDF no tiene texto extraíble
     """
     text_pages = []
 
@@ -151,31 +156,28 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
                 if page_text.strip():
                     text_pages.append(f"--- Página {i+1} ---\n{page_text}")
 
-        # Si obtuvimos texto, retornarlo
+        # Si obtuvimos texto suficiente (más de 50 caracteres), retornarlo
         if text_pages:
             full_text = "\n\n".join(text_pages)
-            print(f"[DEBUG] PDF con texto extraído: {len(full_text)} caracteres")
-            return full_text
+            if len(full_text.strip()) > 50:
+                print(f"[DEBUG] PDF con texto extraído: {len(full_text)} caracteres")
+                return full_text, False
     finally:
         os.unlink(pdf_path)
 
-    # Si no hay texto, usar OCR
-    print("[DEBUG] PDF sin texto, usando OCR...")
-    images = convert_from_bytes(pdf_bytes)
-
-    for i, img in enumerate(images):
-        page_text = pytesseract.image_to_string(img, lang="spa")
-        if page_text.strip():
-            text_pages.append(f"--- Página {i+1} ---\n{page_text}")
-
-    full_text = "\n\n".join(text_pages) if text_pages else "No se pudo extraer texto del documento."
-    print(f"[DEBUG] OCR completado: {len(full_text)} caracteres")
-    return full_text
+    # PDF escaneado - no usar OCR, devolver None para usar visión
+    print("[DEBUG] PDF escaneado detectado, se usará modelo de visión")
+    return None, True
 
 
-def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
+def extract_text_from_file(file_bytes: bytes, filename: str) -> tuple:
     """
     Extrae texto de un archivo (PDF, Office, imagen).
+
+    Returns:
+        tuple: (texto, es_escaneado)
+            - texto: str con el texto extraído o None si es escaneado
+            - es_escaneado: bool True si es imagen/PDF escaneado (usar visión)
     """
     ext = os.path.splitext(filename.lower())[1]
 
@@ -188,11 +190,9 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
         return extract_text_from_pdf(file_bytes)
 
     elif ext in IMAGE_EXTENSIONS:
-        # OCR directo para imágenes
-        img = Image.open(BytesIO(file_bytes))
-        text = pytesseract.image_to_string(img, lang="spa")
-        print(f"[DEBUG] OCR imagen: {len(text)} caracteres")
-        return text if text.strip() else "No se pudo extraer texto de la imagen."
+        # Imágenes siempre van a visión, no usar OCR
+        print(f"[DEBUG] Imagen detectada, se usará modelo de visión")
+        return None, True
 
     else:
         raise Exception(f"Formato no soportado: {ext}")

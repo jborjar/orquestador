@@ -94,6 +94,8 @@ services:
     image: orquestador-workers
     restart: unless-stopped
     # Sin container_name para permitir multiples replicas
+    deploy:
+      replicas: 2
     environment:
       - TZ=${TZ}
       # URLs de servicios de IA (stack agente_ia)
@@ -119,6 +121,12 @@ services:
       redis:
         condition: service_healthy
     # Sin puerto expuesto, nginx enruta el trafico
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # -----------------------------------------------------------
   # Autoscaler - Escalado automatico
